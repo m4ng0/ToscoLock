@@ -15,7 +15,9 @@
 // Security can be WLAN_SEC_UNSEC, WLAN_SEC_WEP, WLAN_SEC_WPA or WLAN_SEC_WPA2
 #define WLAN_SECURITY WLAN_SEC_WPA2
 
-#define FEED_PATH "doorlock/open"
+#define DOORLOCK_OPEN_FEED_PATH "doorlock/open"
+#define DOORLOCK_LOG_FEED_PATH "doorlock/log"
+#define TEMPERATURE_FEED_PATH "doorlock/temperature"
 
 // Constants: pin numbers
 const int BUTTON_PIN = 5;     // the number of the pushbutton pin
@@ -37,6 +39,9 @@ long debounce = 100;   // the debounce time, increase if the output flickers
 
 long timeLastMqttReconnectRetry = 0; // the last time we tried to reconnect to mqtt
 char MQTT_CLIENT_ID[] = "ArduinoDoorlock";
+char temperatureMessage[10];
+long timeLastTemperatureMessage = 0; // the last time we sent a temperature message
+char logMessage[10];
 
 // Use hardware SPI for the remaining pins (on an UNO, SCK = 13, MISO = 12, and MOSI = 11)
 Adafruit_CC3000 cc3000 = Adafruit_CC3000(ADAFRUIT_CC3000_CS, ADAFRUIT_CC3000_IRQ, ADAFRUIT_CC3000_VBAT, SPI_CLOCK_DIVIDER);
@@ -49,15 +54,12 @@ Adafruit_CC3000_Client client = Adafruit_CC3000_Client();
 char WLAN_SSID[] = "<YOUR-SSID>";      // * WiFi network name (cannot be longer than 32 characters)
 char WLAN_PASS[] = "<YOUR-PASSWORD>";  // * WiFi password (leave it empty on open networks)
 
-void callback (char* topic, byte* payload, unsigned int length) {
-  Serial.println(topic);
-  Serial.write(payload, length);
-  Serial.println("");
-}
+// MQTT callback function header
+void mqtt_callback (char* topic, byte* payload, unsigned int length);
 
 IPAddress server(114, 0, 168, 192);  // Important: note the "reverse" ordering!
 
-PubSubClient mqttclient(server, 1883, callback, client);
+PubSubClient mqttclient(server, 1883, mqtt_callback, client);
 
 void setup() {
   Serial.begin(57600);
@@ -124,7 +126,7 @@ boolean mqtt_reconnect() {
   if (mqttclient.connect(MQTT_CLIENT_ID)) {
     Serial.println(F("MQTT Connected"));
     // (re)subscribe to feed
-    mqttclient.subscribe(FEED_PATH);
+    mqttclient.subscribe(DOORLOCK_OPEN_FEED_PATH);
   }
   return mqttclient.connected();
 }
@@ -151,6 +153,24 @@ bool displayConnectionDetails(void) {
   }
 }
 
+void close_relay() {
+  // close relay contact:
+  digitalWrite(RELAY_PIN, HIGH);
+  delay(RELAY_CLOSED_STATE_DURATION);
+  // reopen relay contact
+  digitalWrite(RELAY_PIN, LOW);
+  String(millis(), DEC).toCharArray(logMessage, 10);
+  mqttclient.publish(DOORLOCK_LOG_FEED_PATH, logMessage);
+}
+
+void mqtt_callback (char* topic, byte* payload, unsigned int length) {
+  Serial.println(topic);
+  Serial.write(payload, length);
+  Serial.println("");
+  if (strcmp(topic, DOORLOCK_OPEN_FEED_PATH) == 0) {
+    close_relay();
+  }
+}
 
 void loop() {
   //delay(200);
@@ -167,11 +187,7 @@ void loop() {
     isPushing = true;
     Serial.println("pushed!");
     Serial.println(convertTMP36Input(analogRead(3)));
-    // close relay contact:
-    digitalWrite(RELAY_PIN, HIGH);
-    delay(RELAY_CLOSED_STATE_DURATION);
-    // reopen relay contact
-    digitalWrite(RELAY_PIN, LOW);
+    close_relay();
   }
   if (buttonState == HIGH) {
     isPushing = false;
@@ -193,6 +209,14 @@ void loop() {
   } else {
     // mqtt client is connected
     mqttclient.loop();
+  }
+
+  long now = millis();
+  if (now - timeLastTemperatureMessage > 60000) { // we send a temperature message every minute
+    timeLastTemperatureMessage = now;
+    //snprintf(temperatureMessage, 10, "%5.2f", convertTMP36Input(analogRead(3)));
+    dtostrf(convertTMP36Input(analogRead(3)), 10, 2, temperatureMessage);
+    mqttclient.publish(TEMPERATURE_FEED_PATH, temperatureMessage);
   }
 
 }
