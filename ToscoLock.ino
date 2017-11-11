@@ -2,6 +2,9 @@
   ToscoEmiliano 2.0
   Elettroserratura comandata da Arduino (EZControl.it board)
 */
+// PubSubClient MQTT timeout
+#define MQTT_SOCKET_TIMEOUT 5
+
 #include <PubSubClient.h>
 
 #include <Adafruit_CC3000.h>
@@ -37,14 +40,23 @@ bool isPushing = false;
 long timeButtonStateLow = 0;         // the last time the output pin was toggled
 long debounce = 100;   // the debounce time, increase if the output flickers
 
-const unsigned long AP_CONNECT_TIMEOUT = 12L * 1000L; // max time to wait for AP Connection
-const unsigned long DHCP_TIMEOUT = 12L * 1000L; // max time to wait for DHCP
+const unsigned long DELAY_FOR_FIRST_CONNECTION = 1L * 60L * 1000L; // time to wait before attempting a wifi connection
+boolean wifiSetup = false;  // we try to setup wifi for the first time after the delay set above
+const unsigned long AP_CONNECT_TIMEOUT = 20L * 1000L; // max time to wait for AP Connection
+const unsigned long DHCP_TIMEOUT = 25L * 1000L; // max time to wait for DHCP
+const unsigned long STATIC_IP_TIMEOUT = 5L * 1000L; // max time to wait for setting static IP
+bool staticIpConfSet = false;
 const unsigned long DISPLAY_DETAILS_TIMEOUT = 4L * 1000L; // max time to wait for DHCP
+const unsigned long AP_TRY_TO_RECONNECT_EVERY = 3L * 60L * 1000L; // frequency we try to reconnect to MQTT if disconnected
+const unsigned long MQTT_TRY_TO_RECONNECT_EVERY = 20L * 1000L; // frequency we try to reconnect to MQTT if disconnected
+const unsigned long TEMPERATURE_READ_EVERY = 1L * 60L * 1000L; // frequency we read the temperature and send through MQTT
 
-long timeLastMqttReconnectRetry = 0; // the last time we tried to reconnect to mqtt
+unsigned long timeLastWiFiConnectRetry = 0; // the last time we tried to reconnect to AP
+unsigned long wifiConnectConsecutiveFailures = 0; // how many wifi connection issues in a row
+unsigned long timeLastMqttReconnectRetry = 0; // the last time we tried to reconnect to mqtt
 char MQTT_CLIENT_ID[] = "ArduinoDoorlock";
 char temperatureMessage[10];
-long timeLastTemperatureMessage = 0; // the last time we sent a temperature message
+unsigned long timeLastTemperatureMessage = 0; // the last time we sent a temperature message
 char logMessage[10];
 
 // Use hardware SPI for the remaining pins (on an UNO, SCK = 13, MISO = 12, and MOSI = 11)
@@ -66,7 +78,7 @@ IPAddress server(10, 1, 168, 192);  // Important: note the "reverse" ordering!
 PubSubClient mqttclient(server, 1883, mqtt_callback, client);
 
 void setup() {
-  Serial.begin(57600);
+  Serial.begin(115200);
 
   // initialize the relay pin as an output:
   pinMode(RELAY_PIN, OUTPUT);
@@ -75,13 +87,7 @@ void setup() {
   digitalWrite(BUTTON_PIN, HIGH);  // enable pullup
 
   Serial.println(F("[CC3000] Hi there"));
-  delay(500);
-
-  Serial.println(F("[CC3000] Init the WiFi connection"));
-  if (!cc3000.begin()) {
-    Serial.println(F("[CC3000] Fail init CC3000"));
-    for(;;);
-  }
+  //delay(500);
 
   /*Serial.println(F("[CC3000] Deleting old profiles"));
   if (!cc3000.deleteProfiles()) {
@@ -89,20 +95,15 @@ void setup() {
     while(1);
   }*/
 
-  char *ssid = WLAN_SSID;
+  //char *ssid = WLAN_SSID;
   Serial.print(F("[CC3000] Setting SSID to "));
-  Serial.println(ssid);
+  Serial.println(WLAN_SSID);
   Serial.print(F("\n"));
 
-  // (note: secure connections are not available in 'Tiny' mode)
-  doConnectToAP();
+  //setupWiFiConnection();
 
-  doDHCP();
-
-  /* Display the IP address DNS, Gateway, etc. */
-  doDisplayConnectionDetails();
-
-  timeLastMqttReconnectRetry = 0;
+  timeLastWiFiConnectRetry = DELAY_FOR_FIRST_CONNECTION;
+  timeLastMqttReconnectRetry = DELAY_FOR_FIRST_CONNECTION;
 
   Serial.println("Setup completato");
 }
@@ -152,8 +153,10 @@ void close_relay() {
   delay(RELAY_CLOSED_STATE_DURATION);
   // reopen relay contact
   digitalWrite(RELAY_PIN, LOW);
-  String(millis(), DEC).toCharArray(logMessage, 10);
-  mqttclient.publish(DOORLOCK_LOG_FEED_PATH, logMessage);
+  if (wifiSetup) {
+    String(millis(), DEC).toCharArray(logMessage, 10);
+    mqttclient.publish(DOORLOCK_LOG_FEED_PATH, logMessage);
+  }
 }
 
 void mqtt_callback (char* topic, byte* payload, unsigned int length) {
@@ -166,6 +169,7 @@ void mqtt_callback (char* topic, byte* payload, unsigned int length) {
 }
 
 void loop() {
+  //Serial.println(F("luppamelo"));
   //delay(200);
   // read the state of the pushbutton value:
   buttonState = digitalRead(BUTTON_PIN);
@@ -189,53 +193,156 @@ void loop() {
   }
   previousButtonState = buttonState;
 
-  if (!mqttclient.connected()) {
-    long now = millis();
-    if (now - timeLastMqttReconnectRetry > 5000) {
-      Serial.println("Attempting MQTT connection");
-      timeLastMqttReconnectRetry = now;
-      // try to reconnect
-      if (mqtt_reconnect()) {
-        timeLastMqttReconnectRetry = 0;
-      }
+  if (millis() > DELAY_FOR_FIRST_CONNECTION) {
+    if (!wifiSetup) {
+      wifiSetup = true;
+      setupWiFiConnection();
     }
-  } else {
-    // mqtt client is connected
-    mqttclient.loop();
-  }
 
-  long now = millis();
-  if (now - timeLastTemperatureMessage > 60000) { // we send a temperature message every minute
-    timeLastTemperatureMessage = now;
-    //snprintf(temperatureMessage, 10, "%5.2f", convertTMP36Input(analogRead(3)));
-    dtostrf(convertTMP36Input(analogRead(3)), 10, 2, temperatureMessage);
-    mqttclient.publish(TEMPERATURE_FEED_PATH, temperatureMessage);
-  }
+    if (!cc3000.checkConnected()) {
+      unsigned long now = millis();
+      if (now - timeLastWiFiConnectRetry > calculateWiFiRetryFrequency(wifiConnectConsecutiveFailures)) {
+        wifiConnectConsecutiveFailures++;
+        Serial.println(F("[CC300] Reconnecting to AP"));
+        timeLastWiFiConnectRetry = now;
+        cc3000.reboot(); // is this really necessary?
+        setupWiFiConnection();
+      }
+    } else {
+      wifiConnectConsecutiveFailures = 0;
+      timeLastWiFiConnectRetry = 0;;
+    }
 
+    if (!mqttclient.connected()) {
+      unsigned long now = millis();
+      if (now - timeLastMqttReconnectRetry > MQTT_TRY_TO_RECONNECT_EVERY) {
+        Serial.println("Attempting MQTT connection");
+        timeLastMqttReconnectRetry = now;
+        // try to reconnect
+        if (mqtt_reconnect()) {
+          timeLastMqttReconnectRetry = 0;
+        }
+      }
+    } else {
+      // mqtt client is connected
+      mqttclient.loop();
+    }
+
+    unsigned long now = millis();
+    if (now - timeLastTemperatureMessage > TEMPERATURE_READ_EVERY) { // we send a temperature message every minute
+      timeLastTemperatureMessage = now;
+      //snprintf(temperatureMessage, 10, "%5.2f", convertTMP36Input(analogRead(3)));
+      dtostrf(convertTMP36Input(analogRead(3)), 10, 2, temperatureMessage);
+      mqttclient.publish(TEMPERATURE_FEED_PATH, temperatureMessage);
+    }
+  }
 }
 
-void doConnectToAP() {
+bool doConnectToAP() {
   Serial.println(F("[CC3000] Connecting to AP"));
   unsigned long start = millis();
+  bool connectedToAp = false;
   // (note: secure connections are not available in 'Tiny' mode)
-  while (!cc3000.connectToAP(WLAN_SSID, WLAN_PASS, WLAN_SECURITY) && (millis() - start < AP_CONNECT_TIMEOUT)) {
+  while (connectedToAp = cc3000.connectToAP(WLAN_SSID, WLAN_PASS, WLAN_SECURITY), (!connectedToAp && (millis() - start < AP_CONNECT_TIMEOUT))) {
     Serial.println(F("[CC300] Connection failed"));
     delay(100);
   }
+  return connectedToAp;
 }
 
-void doDHCP() {
+bool doDHCP() {
     /* Wait for DHCP to complete */
   Serial.println(F("[CC3000] Setting DHCP"));
   unsigned long start = millis();
-  while (!cc3000.checkDHCP() && (millis() - start < DHCP_TIMEOUT)) {
-    delay(100);
+  bool dhcpOk = false;
+  while (dhcpOk = cc3000.checkDHCP(), (!dhcpOk && (millis() - start < DHCP_TIMEOUT))) {
+    Serial.println(F("[CC300] DHCP Connection failed"));
+    delay(400);
   }
+  return dhcpOk;
 }
+
+/*void doSetStaticIP() {
+  if (!staticIpConfSet) {
+    Serial.println(F("[CC3000] Setting Static IP"));
+    uint32_t ipAddress = cc3000.IP2U32(192, 168, 1, 22);
+    uint32_t netMask = cc3000.IP2U32(255, 255, 255, 0);
+    uint32_t defaultGateway = cc3000.IP2U32(192, 168, 1, 1);
+    uint32_t dns = cc3000.IP2U32(192, 168, 1, 1);
+    unsigned long start = millis();
+    bool staticIpConfSet = false;
+    while (staticIpConfSet = cc3000.setStaticIPAddress(ipAddress, netMask, defaultGateway, dns), (!staticIpConfSet && (millis() - start < STATIC_IP_TIMEOUT))) {
+      Serial.println(F("Failed to set static IP!"));
+      delay(200);
+    }
+  }
+}*/
+
+  /* Optional: Set a static IP address instead of using DHCP.
+     Note that the setStaticIPAddress function will save its state
+     in the CC3000's internal non-volatile memory and the details
+     will be used the next time the CC3000 connects to a network.
+     This means you only need to call the function once and the
+     CC3000 will remember the connection details.  To switch back
+     to using DHCP, call the setDHCP() function (again only needs
+     to be called once).
+  */
+  /*
+  uint32_t ipAddress = cc3000.IP2U32(192, 168, 1, 19);
+  uint32_t netMask = cc3000.IP2U32(255, 255, 255, 0);
+  uint32_t defaultGateway = cc3000.IP2U32(192, 168, 1, 1);
+  uint32_t dns = cc3000.IP2U32(8, 8, 4, 4);
+  if (!cc3000.setStaticIPAddress(ipAddress, netMask, defaultGateway, dns)) {
+    Serial.println(F("Failed to set static IP!"));
+    while(1);
+  }
+  */
+  /* Optional: Revert back from static IP addres to use DHCP.
+     See note for setStaticIPAddress above, this only needs to be
+     called once and will be remembered afterwards by the CC3000.
+  */
+  /*
+  if (!cc3000.setDHCP()) {
+    Serial.println(F("Failed to set DHCP!"));
+    while(1);
+  }
+  */
 
 void doDisplayConnectionDetails() {
   unsigned long start = millis();
   while(!displayConnectionDetails() && (millis() - start < DISPLAY_DETAILS_TIMEOUT)) {
+    Serial.println(F("Waiting for connection detail"));
     delay(500);
   }
+}
+
+void setupWiFiConnection() {
+  Serial.println(F("[CC3000] Init the WiFi connection"));
+  if (!cc3000.begin()) {
+    Serial.println(F("[CC3000] Fail init CC3000"));
+    return;
+  }
+  //doSetStaticIP(); // alternative to DHCP
+
+  /*if (!cc3000.setDHCP()) {
+    Serial.println(F("Failed to set DHCP!"));
+    while(1);
+  }*/
+
+  if (doConnectToAP()) {
+    if (doDHCP()) {
+      /* Display the IP address DNS, Gateway, etc. */
+      doDisplayConnectionDetails();
+    }
+  }
+}
+
+unsigned long calculateWiFiRetryFrequency(unsigned long failures) {
+  if (failures < 2) {
+    return 1L * 60L * 1000L;  // 1 minute
+  }
+  if (failures < 10) {
+    return 2L * 60L * 1000L;  // 2 minutes
+  }
+  return 10L * 60L * 1000L;  // 10 minutes
 }
