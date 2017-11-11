@@ -37,6 +37,10 @@ bool isPushing = false;
 long timeButtonStateLow = 0;         // the last time the output pin was toggled
 long debounce = 100;   // the debounce time, increase if the output flickers
 
+const unsigned long AP_CONNECT_TIMEOUT = 12L * 1000L; // max time to wait for AP Connection
+const unsigned long DHCP_TIMEOUT = 12L * 1000L; // max time to wait for DHCP
+const unsigned long DISPLAY_DETAILS_TIMEOUT = 4L * 1000L; // max time to wait for DHCP
+
 long timeLastMqttReconnectRetry = 0; // the last time we tried to reconnect to mqtt
 char MQTT_CLIENT_ID[] = "ArduinoDoorlock";
 char temperatureMessage[10];
@@ -57,7 +61,7 @@ char WLAN_PASS[] = "<YOUR-PASSWORD>";  // * WiFi password (leave it empty on ope
 // MQTT callback function header
 void mqtt_callback (char* topic, byte* payload, unsigned int length);
 
-IPAddress server(114, 0, 168, 192);  // Important: note the "reverse" ordering!
+IPAddress server(10, 1, 168, 192);  // Important: note the "reverse" ordering!
 
 PubSubClient mqttclient(server, 1883, mqtt_callback, client);
 
@@ -79,35 +83,24 @@ void setup() {
     for(;;);
   }
 
-  Serial.println(F("[CC3000] Deleting old profiles"));
+  /*Serial.println(F("[CC3000] Deleting old profiles"));
   if (!cc3000.deleteProfiles()) {
     Serial.println(F("[CC3000] Fail deleting old profiles"));
     while(1);
-  }
+  }*/
 
   char *ssid = WLAN_SSID;
-  Serial.print(F("[CC3000] Connecting to "));
+  Serial.print(F("[CC3000] Setting SSID to "));
   Serial.println(ssid);
   Serial.print(F("\n"));
 
   // (note: secure connections are not available in 'Tiny' mode)
-  if (!cc3000.connectToAP(WLAN_SSID, WLAN_PASS, WLAN_SECURITY)) {
-    Serial.println(F("[CC300] Connection failed"));
-    while(1);
-  }
+  doConnectToAP();
 
-  Serial.println(F("[CC3000] Connection OK"));
-
-  /* Wait for DHCP to complete */
-  Serial.println(F("[CC3000] Setting DHCP"));
-  while (!cc3000.checkDHCP()) {
-    delay(100); // ToDo: Insert a DHCP timeout!
-  }
+  doDHCP();
 
   /* Display the IP address DNS, Gateway, etc. */
-  while (!displayConnectionDetails()) {
-    delay(1000);
-  }
+  doDisplayConnectionDetails();
 
   timeLastMqttReconnectRetry = 0;
 
@@ -219,4 +212,30 @@ void loop() {
     mqttclient.publish(TEMPERATURE_FEED_PATH, temperatureMessage);
   }
 
+}
+
+void doConnectToAP() {
+  Serial.println(F("[CC3000] Connecting to AP"));
+  unsigned long start = millis();
+  // (note: secure connections are not available in 'Tiny' mode)
+  while (!cc3000.connectToAP(WLAN_SSID, WLAN_PASS, WLAN_SECURITY) && (millis() - start < AP_CONNECT_TIMEOUT)) {
+    Serial.println(F("[CC300] Connection failed"));
+    delay(100);
+  }
+}
+
+void doDHCP() {
+    /* Wait for DHCP to complete */
+  Serial.println(F("[CC3000] Setting DHCP"));
+  unsigned long start = millis();
+  while (!cc3000.checkDHCP() && (millis() - start < DHCP_TIMEOUT)) {
+    delay(100);
+  }
+}
+
+void doDisplayConnectionDetails() {
+  unsigned long start = millis();
+  while(!displayConnectionDetails() && (millis() - start < DISPLAY_DETAILS_TIMEOUT)) {
+    delay(500);
+  }
 }
