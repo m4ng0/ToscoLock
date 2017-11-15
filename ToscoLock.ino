@@ -2,13 +2,13 @@
   ToscoEmiliano 2.0
   Elettroserratura comandata da Arduino (EZControl.it board)
 */
-// PubSubClient MQTT timeout
-#define MQTT_SOCKET_TIMEOUT 5
 
 #include <PubSubClient.h>
 
 #include <Adafruit_CC3000.h>
 #include <ccspi.h>
+
+#include <utility/netapp.h>
 
 // Interrupt and control pins
 #define ADAFRUIT_CC3000_IRQ   2
@@ -47,13 +47,12 @@ const unsigned long DHCP_TIMEOUT = 25L * 1000L; // max time to wait for DHCP
 const unsigned long STATIC_IP_TIMEOUT = 5L * 1000L; // max time to wait for setting static IP
 bool staticIpConfSet = false;
 const unsigned long DISPLAY_DETAILS_TIMEOUT = 4L * 1000L; // max time to wait for DHCP
-const unsigned long AP_TRY_TO_RECONNECT_EVERY = 3L * 60L * 1000L; // frequency we try to reconnect to MQTT if disconnected
-const unsigned long MQTT_TRY_TO_RECONNECT_EVERY = 20L * 1000L; // frequency we try to reconnect to MQTT if disconnected
 const unsigned long TEMPERATURE_READ_EVERY = 1L * 60L * 1000L; // frequency we read the temperature and send through MQTT
 
 unsigned long timeLastWiFiConnectRetry = 0; // the last time we tried to reconnect to AP
 unsigned long wifiConnectConsecutiveFailures = 0; // how many wifi connection issues in a row
 unsigned long timeLastMqttReconnectRetry = 0; // the last time we tried to reconnect to mqtt
+unsigned long mqttConnectConsecutiveFailures = 0; // how many mqtt connection issues in a row
 char MQTT_CLIENT_ID[] = "ArduinoDoorlock";
 char temperatureMessage[10];
 unsigned long timeLastTemperatureMessage = 0; // the last time we sent a temperature message
@@ -117,10 +116,13 @@ float convertTMP36Input(int rawAnalogicInput) {
 // Function to connect and reconnect as necessary to the MQTT server.
 // Should be called in the loop function and it will take care if connecting.
 boolean mqtt_reconnect() {
+  Serial.println(F("mqtt_reconnect called"));
   if (mqttclient.connect(MQTT_CLIENT_ID)) {
     Serial.println(F("MQTT Connected"));
     // (re)subscribe to feed
     mqttclient.subscribe(DOORLOCK_OPEN_FEED_PATH);
+  } else {
+    Serial.println(F("mqtt_reconnect NOT CONNECTED"));
   }
   return mqttclient.connected();
 }
@@ -200,6 +202,7 @@ void loop() {
     }
 
     if (!cc3000.checkConnected()) {
+      //Serial.println("CC3000 not connected!");
       unsigned long now = millis();
       if (now - timeLastWiFiConnectRetry > calculateWiFiRetryFrequency(wifiConnectConsecutiveFailures)) {
         wifiConnectConsecutiveFailures++;
@@ -215,12 +218,17 @@ void loop() {
 
     if (!mqttclient.connected()) {
       unsigned long now = millis();
-      if (now - timeLastMqttReconnectRetry > MQTT_TRY_TO_RECONNECT_EVERY) {
+      if (now - timeLastMqttReconnectRetry > calculateMqttRetryFrequency(mqttConnectConsecutiveFailures)) {
+        mqttConnectConsecutiveFailures++;
         Serial.println("Attempting MQTT connection");
         timeLastMqttReconnectRetry = now;
         // try to reconnect
         if (mqtt_reconnect()) {
+          Serial.println("Reconnecting to MQTT connection: SUCCESS");
+          mqttConnectConsecutiveFailures = 0;
           timeLastMqttReconnectRetry = 0;
+        } else {
+          Serial.println("Reconnecting to MQTT connection: FAILURE");
         }
       }
     } else {
@@ -230,6 +238,7 @@ void loop() {
 
     unsigned long now = millis();
     if (now - timeLastTemperatureMessage > TEMPERATURE_READ_EVERY) { // we send a temperature message every minute
+       Serial.println("Reading temperature");
       timeLastTemperatureMessage = now;
       //snprintf(temperatureMessage, 10, "%5.2f", convertTMP36Input(analogRead(3)));
       dtostrf(convertTMP36Input(analogRead(3)), 10, 2, temperatureMessage);
@@ -331,9 +340,21 @@ void setupWiFiConnection() {
 
   if (doConnectToAP()) {
     if (doDHCP()) {
+      doSetTimeoutToMinimum();
       /* Display the IP address DNS, Gateway, etc. */
       doDisplayConnectionDetails();
     }
+  }
+}
+
+void doSetTimeoutToMinimum() {
+  // Texas Instruments wrote 20 seconds in the firmware as a minimum value, so we have to face it
+  unsigned long aucDHCP = 14400;
+  unsigned long aucARP = 3600;
+  unsigned long aucKeepalive = 10;
+  unsigned long aucInactivity = 20;
+  if (netapp_timeout_values(&aucDHCP, &aucARP, &aucKeepalive, &aucInactivity) != 0) {
+    Serial.println("Error setting inactivity timeout!");
   }
 }
 
@@ -343,6 +364,16 @@ unsigned long calculateWiFiRetryFrequency(unsigned long failures) {
   }
   if (failures < 10) {
     return 2L * 60L * 1000L;  // 2 minutes
+  }
+  return 10L * 60L * 1000L;  // 10 minutes
+}
+
+unsigned long calculateMqttRetryFrequency(unsigned long failures) {
+  if (failures <= 3) {
+    return failures * 30L * 1000L; // 30*failures seconds
+  }
+  if (failures < 10) {
+    return 5L * 60L * 1000L;  // 5 minutes
   }
   return 10L * 60L * 1000L;  // 10 minutes
 }
