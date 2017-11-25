@@ -23,8 +23,9 @@
 #define TEMPERATURE_FEED_PATH "doorlock/temperature"
 
 // Constants: pin numbers
-const int BUTTON_PIN = 5;     // the number of the pushbutton pin
-const int RELAY_PIN =  7;      // the number of the relay pin
+const int BUTTON_PIN = 5;  // the number of the pushbutton pin
+const int RELAY_PIN =  7;  // the number of the relay pin
+const int LED_PIN = 9;     // the number of the LED pin for status
 
 const float ARDUINO_VOLTAGE = 3.3;  // EZControl board uses 3.3V instead of 5V
 
@@ -87,6 +88,8 @@ void setup() {
   // initialize the pushbutton pin as an input:
   pinMode(BUTTON_PIN, INPUT);
   digitalWrite(BUTTON_PIN, HIGH);  // enable pullup
+  // initialize the LED pin
+  pinMode(LED_PIN, OUTPUT);
 
   Serial.println(F("[CC3000] Hi there"));
   //delay(500);
@@ -227,6 +230,7 @@ void loop() {
   if (theNow - lastMqttConnectLoop > 100) {
     lastMqttConnectLoop = theNow;
     if (!mqttclient.connected()) {
+      digitalWrite(LED_PIN, LOW);
       unsigned long now = millis();
       if (now - timeLastMqttReconnectRetry > calculateMqttRetryFrequency(mqttConnectConsecutiveFailures)) {
         mqttConnectConsecutiveFailures++;
@@ -242,6 +246,7 @@ void loop() {
         }
       }
     } else {
+      digitalWrite(LED_PIN, HIGH);
       // mqtt client is connected
       mqttclient.loop();
     }
