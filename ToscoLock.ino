@@ -3,7 +3,7 @@
   Elettroserratura comandata da Arduino (EZControl.it board)
 */
 
-#include <PubSubClient.h>
+#include <MyPubSubClient.h>
 
 #include <Adafruit_CC3000.h>
 #include <ccspi.h>
@@ -57,6 +57,9 @@ char MQTT_CLIENT_ID[] = "ArduinoDoorlock";
 char temperatureMessage[10];
 unsigned long timeLastTemperatureMessage = 0; // the last time we sent a temperature message
 char logMessage[10];
+unsigned long theNow;
+unsigned long lastWifiConnectLoop = 0;
+unsigned long lastMqttConnectLoop = 0;
 
 // Use hardware SPI for the remaining pins (on an UNO, SCK = 13, MISO = 12, and MOSI = 11)
 Adafruit_CC3000 cc3000 = Adafruit_CC3000(ADAFRUIT_CC3000_CS, ADAFRUIT_CC3000_IRQ, ADAFRUIT_CC3000_VBAT, SPI_CLOCK_DIVIDER);
@@ -201,7 +204,10 @@ void loop() {
       setupWiFiConnection();
     }
 
-    if (!cc3000.checkConnected()) {
+    theNow = millis();
+    if (theNow - lastWifiConnectLoop > 300) {
+      lastWifiConnectLoop = theNow;
+          if (!cc3000.checkConnected()) {
       //Serial.println("CC3000 not connected!");
       unsigned long now = millis();
       if (now - timeLastWiFiConnectRetry > calculateWiFiRetryFrequency(wifiConnectConsecutiveFailures)) {
@@ -215,7 +221,11 @@ void loop() {
       wifiConnectConsecutiveFailures = 0;
       timeLastWiFiConnectRetry = 0;;
     }
+    }
 
+  theNow = millis();
+  if (theNow - lastMqttConnectLoop > 100) {
+    lastMqttConnectLoop = theNow;
     if (!mqttclient.connected()) {
       unsigned long now = millis();
       if (now - timeLastMqttReconnectRetry > calculateMqttRetryFrequency(mqttConnectConsecutiveFailures)) {
@@ -235,6 +245,7 @@ void loop() {
       // mqtt client is connected
       mqttclient.loop();
     }
+  }
 
     unsigned long now = millis();
     if (now - timeLastTemperatureMessage > TEMPERATURE_READ_EVERY) { // we send a temperature message every minute
@@ -351,7 +362,7 @@ void doSetTimeoutToMinimum() {
   // Texas Instruments wrote 20 seconds in the firmware as a minimum value, so we have to face it
   unsigned long aucDHCP = 14400;
   unsigned long aucARP = 3600;
-  unsigned long aucKeepalive = 10;
+  unsigned long aucKeepalive = 20;
   unsigned long aucInactivity = 20;
   if (netapp_timeout_values(&aucDHCP, &aucARP, &aucKeepalive, &aucInactivity) != 0) {
     Serial.println("Error setting inactivity timeout!");
